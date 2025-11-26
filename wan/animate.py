@@ -1,4 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+import json
 import logging
 import math
 import os
@@ -268,6 +269,7 @@ class WanAnimate:
 
     def prepare_source(self, src_pose_path, src_face_path, src_ref_path):
         pose_video_reader = VideoReader(src_pose_path)
+        pose_fps = pose_video_reader.get_avg_fps()
         pose_len = len(pose_video_reader)
         pose_idxs = list(range(pose_len))
         cond_images = pose_video_reader.get_batch(pose_idxs).asnumpy()
@@ -279,7 +281,7 @@ class WanAnimate:
         height, width = cond_images[0].shape[:2]
         refer_images = cv2.imread(src_ref_path)[..., ::-1]
         refer_images = self.padding_resize(refer_images, height=height, width=width)
-        return cond_images, face_images, refer_images
+        return cond_images, face_images, refer_images, pose_fps
     
     def prepare_source_for_replace(self, src_bg_path, src_mask_path):
         bg_video_reader = VideoReader(src_bg_path)
@@ -293,6 +295,122 @@ class WanAnimate:
         mask_images = mask_video_reader.get_batch(mask_idxs).asnumpy()
         mask_images = mask_images[:, :, :, 0] / 255
         return bg_images, mask_images
+
+    def prepare_reference_schedule(
+        self,
+        src_root_path,
+        default_ref_path,
+        default_image,
+        target_len,
+        fps,
+        height,
+        width,
+        schedule_filename="src_ref_schedule.json",
+    ):
+        schedule_path = os.path.join(src_root_path, schedule_filename)
+        default_key = os.path.abspath(default_ref_path)
+        ref_cache = {default_key: default_image}
+        reference_track = [default_key] * target_len
+
+        if not os.path.exists(schedule_path):
+            return reference_track, ref_cache
+
+        try:
+            with open(schedule_path, "r", encoding="utf-8") as f:
+                schedule_data = json.load(f)
+        except Exception as exc:
+            logging.warning(
+                "Failed to parse reference schedule %s (%s). Using single default reference.",
+                schedule_path,
+                exc,
+            )
+            return reference_track, ref_cache
+
+        if isinstance(schedule_data, dict) and "intervals" in schedule_data:
+            schedule_items = schedule_data["intervals"]
+        else:
+            schedule_items = schedule_data
+
+        if not isinstance(schedule_items, list):
+            logging.warning(
+                "Reference schedule %s must be a list under the optional 'intervals' key.",
+                schedule_path,
+            )
+            return reference_track, ref_cache
+
+        for idx, interval in enumerate(schedule_items):
+            if not isinstance(interval, dict):
+                logging.warning("Reference schedule entry %d is not a dict; skipping.", idx)
+                continue
+
+            ref_path = interval.get("path") or interval.get("ref_path")
+            if not ref_path:
+                logging.warning(
+                    "Reference schedule entry %d is missing 'path'/'ref_path'; skipping.", idx
+                )
+                continue
+
+            if not os.path.isabs(ref_path):
+                ref_path = os.path.join(src_root_path, ref_path)
+            ref_path = os.path.abspath(ref_path)
+
+            if not os.path.exists(ref_path):
+                logging.warning(
+                    "Reference image %s (entry %d) not found; skipping interval.",
+                    ref_path,
+                    idx,
+                )
+                continue
+
+            start_frame = interval.get("start_frame")
+            end_frame = interval.get("end_frame")
+
+            if start_frame is None and "start_sec" in interval:
+                if fps:
+                    start_frame = int(round(interval["start_sec"] * fps))
+                else:
+                    logging.warning(
+                        "Reference schedule entry %d provides 'start_sec' but video fps is unavailable; ignoring.",
+                        idx,
+                    )
+            if end_frame is None and "end_sec" in interval:
+                if fps:
+                    end_frame = int(round(interval["end_sec"] * fps))
+                else:
+                    logging.warning(
+                        "Reference schedule entry %d provides 'end_sec' but video fps is unavailable; ignoring.",
+                        idx,
+                    )
+
+            start_frame = 0 if start_frame is None else int(start_frame)
+            end_frame = target_len if end_frame is None else int(end_frame)
+
+            if end_frame <= start_frame:
+                logging.warning(
+                    "Reference schedule entry %d has invalid range (%s - %s); skipping.",
+                    idx,
+                    start_frame,
+                    end_frame,
+                )
+                continue
+
+            start_frame = max(0, start_frame)
+            end_frame = min(target_len, end_frame)
+
+            if ref_path not in ref_cache:
+                ref_img = cv2.imread(ref_path)
+                if ref_img is None:
+                    logging.warning(
+                        "Failed to read reference image %s for entry %d; skipping.", ref_path, idx
+                    )
+                    continue
+                ref_img = ref_img[..., ::-1]
+                ref_cache[ref_path] = self.padding_resize(ref_img, height=height, width=width)
+
+            for frame_idx in range(start_frame, end_frame):
+                reference_track[frame_idx] = ref_path
+
+        return reference_track, ref_cache
 
     def generate(
         self,
@@ -314,7 +432,8 @@ class WanAnimate:
 
         Args:
             src_root_path ('str'):
-                Process output path
+                Process output path. When `src_ref_schedule.json` exists under this folder,
+                it is used to map reference images to different time/span intervals.
             replace_flag (`bool`, *optional*, defaults to False):
                 Whether to use character replace.
             clip_len (`int`, *optional*, defaults to 77):
@@ -363,7 +482,11 @@ class WanAnimate:
         src_face_path = os.path.join(src_root_path, "src_face.mp4")
         src_ref_path = os.path.join(src_root_path, "src_ref.png")
 
-        cond_images, face_images, refer_images = self.prepare_source(src_pose_path=src_pose_path, src_face_path=src_face_path, src_ref_path=src_ref_path)
+        cond_images, face_images, refer_images, pose_fps = self.prepare_source(
+            src_pose_path=src_pose_path,
+            src_face_path=src_face_path,
+            src_ref_path=src_ref_path,
+        )
         
         if not self.t5_cpu:
             self.text_encoder.model.to(self.device)
@@ -391,6 +514,15 @@ class WanAnimate:
             mask_images = self.inputs_padding(mask_images, target_len)
 
         height, width = refer_images.shape[:2]
+        reference_track, reference_cache = self.prepare_reference_schedule(
+            src_root_path=src_root_path,
+            default_ref_path=src_ref_path,
+            default_image=refer_images,
+            target_len=target_len,
+            fps=pose_fps,
+            height=height,
+            width=width,
+        )
         start = 0
         end = clip_len
         all_out_frames = []
@@ -402,6 +534,17 @@ class WanAnimate:
                 mask_reft_len = 0
             else:
                 mask_reft_len = refert_num
+
+            clip_ref_path = reference_track[start]
+            clip_ref_image = reference_cache[clip_ref_path]
+            clip_frame_end = min(end, target_len)
+            if any(reference_track[idx] != clip_ref_path for idx in range(start + 1, clip_frame_end)):
+                logging.warning(
+                    "Clip frames [%d, %d) span multiple reference images; using %s for this chunk.",
+                    start,
+                    clip_frame_end,
+                    clip_ref_path,
+                )
 
             batch = {
                         "conditioning_pixel_values": torch.zeros(1, 3, clip_len, height, width),
@@ -422,7 +565,7 @@ class WanAnimate:
             )
 
             batch["refer_pixel_values"] = rearrange(
-                torch.tensor(refer_images / 127.5 - 1), "h w c -> 1 c h w"
+                torch.tensor(clip_ref_image / 127.5 - 1), "h w c -> 1 c h w"
             )
 
             if start > 0:
