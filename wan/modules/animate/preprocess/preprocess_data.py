@@ -1,6 +1,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import os
 import argparse
+import shutil
 from process_pipepline import ProcessPipeline
 
 
@@ -25,6 +26,15 @@ def _parse_args():
         type=str,
         default=None,
         help="The path to the refererence image.")
+    parser.add_argument(
+        "--refer_schedule",
+        type=str,
+        default=None,
+        help=(
+            "Optional JSON file describing multiple reference images. When provided,"
+            " it will be copied to the preprocessing output folder as src_ref_schedule.json"
+        ),
+    )
     parser.add_argument(
         "--save_path",
         type=str,
@@ -119,3 +129,9 @@ if __name__ == '__main__':
                      use_flux=args.use_flux,
                      replace_flag=args.replace_flag)
 
+    if args.refer_schedule is not None:
+        if not os.path.isfile(args.refer_schedule):
+            raise FileNotFoundError(f"refer_schedule file not found: {args.refer_schedule}")
+        schedule_dst = os.path.join(args.save_path, 'src_ref_schedule.json')
+        shutil.copy(args.refer_schedule, schedule_dst)
+        print(f"Reference schedule saved to {schedule_dst}")

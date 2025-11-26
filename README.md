@@ -325,6 +325,21 @@ python ./wan/modules/animate/preprocess/preprocess_data.py \
     --h_len 1 \
     --replace_flag
 ```
+> ✅ **Multiple reference images**: Provide `--refer_schedule /path/to/ref_schedule.json` when running `preprocess_data.py` (or manually place the file under the output directory as `src_ref_schedule.json`). `generate.py` automatically picks it up whenever the file is present.
+
+Example `ref_schedule.json` structure:
+
+```json
+{
+  "intervals": [
+    {"start_sec": 0.0, "end_sec": 4.0, "path": "image_01.png"},
+    {"start_sec": 4.0, "end_sec": 8.0, "path": "alt/image_02.png"},
+    {"start_frame": 240, "end_frame": 320, "path": "/abs/path/image_03.png"}
+  ]
+}
+```
+
+Each interval requires a `path` (absolute or relative to `src_root_path`) and either seconds or frame indices to describe when it applies. Unspecified `end_*` values default to the end of the clip.
 ##### (2) Run in animation mode 
 
 * Single-GPU inference 
@@ -501,4 +516,3 @@ We would like to thank the contributors to the [SD3](https://huggingface.co/stab
 
 ## Contact Us
 If you would like to leave a message to our research or product teams, feel free to join our [Discord](https://discord.gg/AKNgpMK4Yj) or [WeChat groups](https://gw.alicdn.com/imgextra/i2/O1CN01tqjWFi1ByuyehkTSB_!!6000000000015-0-tps-611-1279.jpg)!
-
