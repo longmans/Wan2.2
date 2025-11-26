@@ -426,6 +426,7 @@ class WanAnimate:
         n_prompt="",
         seed=-1,
         offload_model=True,
+        schedule_filename="src_ref_schedule.json",
     ):
         r"""
         Generates video frames from input image using diffusion process.
@@ -458,6 +459,8 @@ class WanAnimate:
                 Random seed for noise generation. If -1, use random seed
             offload_model (`bool`, *optional*, defaults to True):
                 If True, offloads models to CPU during generation to save VRAM
+            schedule_filename (`str`, *optional*, defaults to "src_ref_schedule.json"):
+                Filename of the reference schedule json located under `src_root_path`.
 
         Returns:
             torch.Tensor:
@@ -522,6 +525,7 @@ class WanAnimate:
             fps=pose_fps,
             height=height,
             width=width,
+            schedule_filename=schedule_filename,
         )
         start = 0
         end = clip_len

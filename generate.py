@@ -1,8 +1,10 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import argparse
+import json
 import logging
 import os
 import sys
+import shutil
 import warnings
 from datetime import datetime
 
@@ -100,6 +102,20 @@ def _validate_args(args):
         assert args.size in SUPPORTED_SIZES[
             args.
             task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
+
+    if "animate" in args.task:
+        if args.ref_schedule is not None:
+            assert args.src_root_path is not None, "--ref_schedule requires --src_root_path to be specified."
+            assert os.path.isfile(args.ref_schedule), f"ref_schedule file not found: {args.ref_schedule}"
+        if args.ref_schedule_filename:
+            basename = os.path.basename(args.ref_schedule_filename)
+            assert basename == args.ref_schedule_filename, "--ref_schedule_filename must not include directory components."
+        else:
+            args.ref_schedule_filename = "src_ref_schedule.json"
+    else:
+        assert args.ref_schedule is None, "--ref_schedule is only supported for animate tasks."
+        assert not args.overwrite_ref_schedule, "--overwrite_ref_schedule is only supported for animate tasks."
+        assert args.ref_schedule_filename == "src_ref_schedule.json", "--ref_schedule_filename is only supported for animate tasks."
 
 
 def _parse_args():
@@ -244,7 +260,25 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to use relighting lora.")
-    
+    parser.add_argument(
+        "--ref_schedule",
+        type=str,
+        default=None,
+        help="Path to a reference schedule JSON file for WanAnimate."
+    )
+    parser.add_argument(
+        "--ref_schedule_filename",
+        type=str,
+        default="src_ref_schedule.json",
+        help="Filename to store the reference schedule JSON under --src_root_path."
+    )
+    parser.add_argument(
+        "--overwrite_ref_schedule",
+        action="store_true",
+        default=False,
+        help="Overwrite an existing reference schedule file inside --src_root_path."
+    )
+
     # following args only works for s2v
     parser.add_argument(
         "--num_clip",
@@ -467,6 +501,24 @@ def generate(args):
             use_relighting_lora=args.use_relighting_lora
         )
 
+        schedule_filename = args.ref_schedule_filename or "src_ref_schedule.json"
+        if args.ref_schedule is not None:
+            schedule_src = os.path.abspath(args.ref_schedule)
+            try:
+                with open(schedule_src, "r", encoding="utf-8") as schedule_file:
+                    json.load(schedule_file)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in ref_schedule file {schedule_src}: {exc}") from exc
+
+            os.makedirs(args.src_root_path, exist_ok=True)
+            schedule_dst = os.path.join(args.src_root_path, schedule_filename)
+            if os.path.exists(schedule_dst) and not args.overwrite_ref_schedule:
+                raise FileExistsError(
+                    f"Reference schedule already exists at {schedule_dst}. Use --overwrite_ref_schedule to replace it."
+                )
+            shutil.copy(schedule_src, schedule_dst)
+            logging.info("Copied reference schedule to %s", schedule_dst)
+
         logging.info(f"Generating video ...")
         video = wan_animate.generate(
             src_root_path=args.src_root_path,
@@ -478,7 +530,8 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            schedule_filename=schedule_filename)
     elif "s2v" in args.task:
         logging.info("Creating WanS2V pipeline.")
         wan_s2v = wan.WanS2V(
