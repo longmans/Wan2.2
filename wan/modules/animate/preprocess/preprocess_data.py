@@ -3,6 +3,7 @@ import os
 import argparse
 import json
 from process_pipepline import ProcessPipeline
+import shutil
 
 
 def _parse_args():
