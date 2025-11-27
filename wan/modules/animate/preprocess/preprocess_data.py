@@ -25,7 +25,22 @@ def _parse_args():
         "--refer_path",
         type=str,
         default=None,
-        help="The path to the refererence image.")
+        help="(Deprecated) Alias for --refer_front_path. Will be removed in future releases.")
+    parser.add_argument(
+        "--refer_front_path",
+        type=str,
+        default=None,
+        help="The path to the front-facing reference image. If omitted, falls back to --refer_path.")
+    parser.add_argument(
+        "--refer_side_path",
+        type=str,
+        default=None,
+        help="Optional side-view reference image. Defaults to the front image when not provided.")
+    parser.add_argument(
+        "--refer_back_path",
+        type=str,
+        default=None,
+        help="Optional back-view reference image. Defaults to the front image when not provided.")
     parser.add_argument(
         "--refer_schedule",
         type=str,
@@ -121,6 +136,15 @@ def _resolve_reference_path(path_value, schedule_dir, save_path):
     )
 
 
+def _normalize_reference_file(path_value, description):
+    if path_value is None:
+        return None
+    expanded = os.path.abspath(os.path.expanduser(path_value))
+    if not os.path.isfile(expanded):
+        raise FileNotFoundError(f"{description} not found: {path_value}")
+    return expanded
+
+
 def _load_reference_schedule(schedule_path, save_path):
     schedule_src = os.path.abspath(schedule_path)
     with open(schedule_src, "r", encoding="utf-8") as schedule_file:
@@ -168,11 +192,21 @@ if __name__ == '__main__':
             raise FileNotFoundError(f"refer_schedule file not found: {args.refer_schedule}")
         schedule_data, schedule_records = _load_reference_schedule(args.refer_schedule, args.save_path)
 
-    reference_candidates = []
-    if args.refer_path is not None:
-        if not os.path.isfile(args.refer_path):
-            raise FileNotFoundError(f"refer_path file not found: {args.refer_path}")
-        reference_candidates.append(os.path.abspath(os.path.expanduser(args.refer_path)))
+    front_source = args.refer_front_path or args.refer_path
+    if front_source is None:
+        raise ValueError("Please provide --refer_front_path (preferred) or --refer_path as the primary reference image.")
+
+    front_path = _normalize_reference_file(front_source, "Front reference image")
+    side_path = _normalize_reference_file(args.refer_side_path, "Side reference image") or front_path
+    back_path = _normalize_reference_file(args.refer_back_path, "Back reference image") or front_path
+
+    orientation_paths = {
+        "front": front_path,
+        "side": side_path,
+        "back": back_path,
+    }
+
+    reference_candidates = [front_path, side_path, back_path]
 
     reference_candidates.extend(record["resolved_path"] for record in schedule_records)
 
@@ -195,8 +229,8 @@ if __name__ == '__main__':
     flux_kontext_path = os.path.join(args.ckpt_path, 'FLUX.1-Kontext-dev') if args.use_flux else None
     process_pipeline = ProcessPipeline(det_checkpoint_path=det_checkpoint_path, pose2d_checkpoint_path=pose2d_checkpoint_path, sam_checkpoint_path=sam2_checkpoint_path, flux_kontext_path=flux_kontext_path)
     os.makedirs(args.save_path, exist_ok=True)
-    process_pipeline(video_path=args.video_path, 
-                     refer_image_path=deduped_references[0],
+    pipeline_result = process_pipeline(video_path=args.video_path, 
+                     refer_image_path=orientation_paths["front"],
                      refer_image_paths=deduped_references,
                      output_path=args.save_path,
                      resolution_area=args.resolution_area,
@@ -208,6 +242,31 @@ if __name__ == '__main__':
                      retarget_flag=args.retarget_flag,
                      use_flux=args.use_flux,
                      replace_flag=args.replace_flag)
+
+    orientation_filenames = {
+        "front": "src_ref_front.png",
+        "side": "src_ref_side.png",
+        "back": "src_ref_back.png",
+    }
+    for orientation, src_path in orientation_paths.items():
+        dst_path = os.path.join(args.save_path, orientation_filenames[orientation])
+        if os.path.abspath(src_path) == os.path.abspath(dst_path):
+            continue
+        shutil.copy(src_path, dst_path)
+
+    if pipeline_result and pipeline_result.get("orientation_track"):
+        orientation_track = list(pipeline_result.get("orientation_track", []))
+        frame_count = pipeline_result.get("frame_count", len(orientation_track))
+        orientation_meta = {
+            "fps": pipeline_result.get("fps", args.fps),
+            "frame_count": frame_count,
+            "orientations": orientation_track,
+            "labels": orientation_filenames,
+        }
+        orientation_path = os.path.join(args.save_path, 'src_orientation_track.json')
+        with open(orientation_path, 'w', encoding='utf-8') as orientation_file:
+            json.dump(orientation_meta, orientation_file, indent=2)
+        print(f"Orientation track saved to {orientation_path}")
 
     if schedule_data is not None:
         ref_mapping = {}

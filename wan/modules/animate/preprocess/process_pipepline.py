@@ -26,6 +26,9 @@ from sam_utils import build_sam2_video_predictor
 
 
 class ProcessPipeline():
+    LEFT_BODY_IDXS = [5, 7, 9, 11, 13]
+    RIGHT_BODY_IDXS = [6, 8, 10, 12, 14]
+
     def __init__(self, det_checkpoint_path, pose2d_checkpoint_path, sam_checkpoint_path, flux_kontext_path):
         self.pose2d = Pose2d(checkpoint=pose2d_checkpoint_path, detector_checkpoint=det_checkpoint_path)
 
@@ -93,6 +96,7 @@ class ProcessPipeline():
 
 
             tpl_pose_metas = self.pose2d(frames)
+            orientation_track = self._compute_orientation_track(tpl_pose_metas)
 
             face_images = []
             for idx, meta in enumerate(tpl_pose_metas):
@@ -141,7 +145,11 @@ class ProcessPipeline():
             aug_masks_new = [np.stack([mask * 255, mask * 255, mask * 255], axis=2) for mask in aug_masks]
             src_mask_path = os.path.join(output_path, 'src_mask.mp4')
             mpy.ImageSequenceClip(aug_masks_new, fps=fps).write_videofile(src_mask_path)
-            return True
+            return {
+                "orientation_track": orientation_track,
+                "fps": fps,
+                "frame_count": len(frames)
+            }
         else:
             refer_img = resize_by_area(refer_img, resolution_area[0] * resolution_area[1], divisor=16)
             
@@ -177,6 +185,7 @@ class ProcessPipeline():
 
             tpl_pose_meta0 = self.pose2d(frames[:1])[0]
             tpl_pose_metas = self.pose2d(frames)
+            orientation_track = self._compute_orientation_track(tpl_pose_metas)
 
             face_images = []
             for idx, meta in enumerate(tpl_pose_metas):
@@ -245,7 +254,11 @@ class ProcessPipeline():
 
             src_pose_path = os.path.join(output_path, 'src_pose.mp4')
             mpy.ImageSequenceClip(cond_images, fps=fps).write_videofile(src_pose_path)
-            return True
+            return {
+                "orientation_track": orientation_track,
+                "fps": fps,
+                "frame_count": len(frames)
+            }
 
     def get_editing_prompts(self, tpl_pose_metas, refer_pose_meta):
         arm_visible = False
@@ -386,3 +399,49 @@ class ProcessPipeline():
                 meta[key] = value
             metas_list.append(meta)
         return metas_list
+
+    def _compute_orientation_track(self, pose_metas):
+        orientations = []
+        for meta in pose_metas:
+            orientations.append(self._classify_orientation(meta))
+        return orientations
+
+    def _classify_orientation(self, meta):
+        face_ratio = self._visibility_ratio(meta.get('keypoints_face'))
+        if face_ratio >= 0.55:
+            return "front"
+
+        profile_score = self._profile_score(meta.get('keypoints_body'))
+        if face_ratio >= 0.25 or profile_score >= 0.15:
+            return "side"
+        return "back"
+
+    def _visibility_ratio(self, keypoints, conf_threshold=0.5):
+        if keypoints is None:
+            return 0.0
+        keypoints = np.array(keypoints)
+        if keypoints.ndim < 2 or keypoints.shape[0] == 0:
+            return 0.0
+        confidences = keypoints[:, 2] if keypoints.shape[1] >= 3 else np.ones(keypoints.shape[0])
+        visible = (confidences > conf_threshold).sum()
+        return float(visible) / float(keypoints.shape[0])
+
+    def _profile_score(self, keypoints_body):
+        if keypoints_body is None:
+            return 0.0
+        keypoints_body = np.array(keypoints_body)
+        if keypoints_body.ndim < 2 or keypoints_body.shape[0] == 0:
+            return 0.0
+
+        left_conf = self._average_confidence(keypoints_body, self.LEFT_BODY_IDXS)
+        right_conf = self._average_confidence(keypoints_body, self.RIGHT_BODY_IDXS)
+        return abs(left_conf - right_conf)
+
+    def _average_confidence(self, keypoints, indices):
+        confidences = []
+        for idx in indices:
+            if idx < keypoints.shape[0]:
+                confidences.append(keypoints[idx, 2])
+        if not confidences:
+            return 0.0
+        return float(np.mean(confidences))

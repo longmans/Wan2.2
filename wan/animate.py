@@ -213,6 +213,26 @@ class WanAnimate:
                 flip = not flip
         return target_array[:target_len]
 
+    def pad_track_sequence(self, sequence, target_len):
+        if not sequence:
+            return []
+        padded = list(sequence)
+        last = padded[-1]
+        while len(padded) < target_len:
+            padded.append(last)
+        return padded[:target_len]
+
+    def slice_clip_sequence(self, sequence, start, length, clip_len):
+        assert length >= 1, "Clip length must be positive"
+        clip = []
+        max_index = len(sequence) - 1
+        for offset in range(length):
+            idx = min(start + offset, max_index)
+            clip.append(deepcopy(sequence[idx]))
+        while len(clip) < clip_len:
+            clip.append(deepcopy(clip[-1]))
+        return clip
+
     def get_valid_len(self, real_len, clip_len=81, overlap=1):
         real_clip_len = clip_len - overlap
         last_clip_num = (real_len - overlap) % real_clip_len
@@ -412,6 +432,83 @@ class WanAnimate:
 
         return reference_track, ref_cache
 
+    def load_orientation_metadata(self, src_root_path, real_frame_len, target_len):
+        orientation_path = os.path.join(src_root_path, "src_orientation_track.json")
+        if not os.path.exists(orientation_path):
+            return None, {}
+
+        try:
+            with open(orientation_path, "r", encoding="utf-8") as orientation_file:
+                data = json.load(orientation_file)
+        except Exception as exc:
+            logging.warning("Failed to read orientation track %s (%s).", orientation_path, exc)
+            return None, {}
+
+        track = data.get("orientations")
+        if not isinstance(track, list) or len(track) == 0:
+            return None, {}
+
+        if len(track) > real_frame_len:
+            track = track[:real_frame_len]
+        elif len(track) < real_frame_len:
+            logging.warning(
+                "Orientation track length (%d) mismatches source frames (%d); padding will be applied.",
+                len(track),
+                real_frame_len,
+            )
+
+        padded_track = self.pad_track_sequence(track, target_len)
+        labels = data.get("labels", {})
+        orientation_refs = self._resolve_orientation_refs(src_root_path, labels)
+        if not orientation_refs:
+            return None, {}
+        return padded_track, orientation_refs
+
+    def _resolve_orientation_refs(self, src_root_path, labels):
+        default_labels = {
+            "front": "src_ref_front.png",
+            "side": "src_ref_side.png",
+            "back": "src_ref_back.png",
+        }
+        resolved = {}
+        for key, default_name in default_labels.items():
+            filename = labels.get(key, default_name)
+            if filename is None:
+                continue
+            candidate = filename if os.path.isabs(filename) else os.path.join(src_root_path, filename)
+            if os.path.isfile(candidate):
+                resolved[key] = os.path.abspath(candidate)
+
+        if "front" not in resolved:
+            fallback = os.path.join(src_root_path, "src_ref.png")
+            if os.path.isfile(fallback):
+                resolved["front"] = os.path.abspath(fallback)
+
+        if "front" not in resolved:
+            return {}
+
+        for key in default_labels:
+            if key not in resolved:
+                resolved[key] = resolved["front"]
+        return resolved
+
+    def apply_orientation_references(self, orientation_track, orientation_refs, reference_track, reference_cache, height, width):
+        front_ref = orientation_refs.get("front")
+        for idx, orientation in enumerate(orientation_track):
+            ref_path = orientation_refs.get(orientation, front_ref)
+            if ref_path is None:
+                continue
+            reference_track[idx] = ref_path
+            if ref_path in reference_cache:
+                continue
+            ref_img = cv2.imread(ref_path)
+            if ref_img is None:
+                logging.warning("Failed to read orientation reference image %s; skipping.", ref_path)
+                continue
+            ref_img = ref_img[..., ::-1]
+            reference_cache[ref_path] = self.padding_resize(ref_img, height=height, width=width)
+        return reference_track
+
     def generate(
         self,
         src_root_path,
@@ -516,6 +613,12 @@ class WanAnimate:
             bg_images = self.inputs_padding(bg_images, target_len)
             mask_images = self.inputs_padding(mask_images, target_len)
 
+        orientation_track, orientation_refs = self.load_orientation_metadata(
+            src_root_path=src_root_path,
+            real_frame_len=real_frame_len,
+            target_len=target_len,
+        )
+
         height, width = refer_images.shape[:2]
         reference_track, reference_cache = self.prepare_reference_schedule(
             src_root_path=src_root_path,
@@ -527,72 +630,79 @@ class WanAnimate:
             width=width,
             schedule_filename=schedule_filename,
         )
+        if orientation_track is not None and orientation_refs:
+            reference_track = self.apply_orientation_references(
+                orientation_track=orientation_track,
+                orientation_refs=orientation_refs,
+                reference_track=reference_track,
+                reference_cache=reference_cache,
+                height=height,
+                width=width,
+            )
+
         start = 0
-        end = clip_len
         all_out_frames = []
-        while True:
-            if start + refert_num >= len(cond_images):
+        out_frames = None
+        while start < target_len:
+            remaining = target_len - start
+            if remaining <= 0:
                 break
 
-            if start == 0:
-                mask_reft_len = 0
-            else:
-                mask_reft_len = refert_num
-
+            clip_window = min(clip_len, remaining)
             clip_ref_path = reference_track[start]
+            chunk_len = clip_window
+            for idx in range(start + 1, start + clip_window):
+                if reference_track[idx] != clip_ref_path:
+                    chunk_len = idx - start
+                    break
+            chunk_len = max(chunk_len, 1)
             clip_ref_image = reference_cache[clip_ref_path]
-            clip_frame_end = min(end, target_len)
-            if any(reference_track[idx] != clip_ref_path for idx in range(start + 1, clip_frame_end)):
-                logging.warning(
-                    "Clip frames [%d, %d) span multiple reference images; using %s for this chunk.",
-                    start,
-                    clip_frame_end,
-                    clip_ref_path,
-                )
+
+            cond_window = self.slice_clip_sequence(cond_images, start, chunk_len, clip_len)
+            face_window = self.slice_clip_sequence(face_images, start, chunk_len, clip_len)
 
             batch = {
-                        "conditioning_pixel_values": torch.zeros(1, 3, clip_len, height, width),
-                        "bg_pixel_values": torch.zeros(1, 3, clip_len, height, width),
-                        "mask_pixel_values": torch.zeros(1, 1, clip_len, height, width),
-                        "face_pixel_values": torch.zeros(1, 3, clip_len, 512, 512),
-                        "refer_pixel_values": torch.zeros(1, 3, height, width),
-                        "refer_t_pixel_values": torch.zeros(refert_num, 3, height, width)
-                    }   
+                "conditioning_pixel_values": rearrange(
+                    torch.tensor(np.stack(cond_window) / 127.5 - 1),
+                    "t h w c -> 1 c t h w",
+                ),
+                "bg_pixel_values": torch.zeros(1, 3, clip_len, height, width),
+                "mask_pixel_values": torch.zeros(1, 1, clip_len, height, width),
+                "face_pixel_values": rearrange(
+                    torch.tensor(np.stack(face_window) / 127.5 - 1),
+                    "t h w c -> 1 c t h w",
+                ),
+                "refer_pixel_values": rearrange(
+                    torch.tensor(clip_ref_image / 127.5 - 1), "h w c -> 1 c h w"
+                ),
+                "refer_t_pixel_values": torch.zeros(refert_num, 3, height, width),
+            }
 
-            batch["conditioning_pixel_values"] = rearrange(
-                torch.tensor(np.stack(cond_images[start:end]) / 127.5 - 1),
-                "t h w c -> 1 c t h w",
+            prev_available = 0 if out_frames is None else out_frames.shape[2]
+            overlap_cap = max(chunk_len - 1, 0)
+            mask_reft_len = min(refert_num, prev_available, overlap_cap)
+
+            if mask_reft_len > 0 and out_frames is not None:
+                prev_refer = out_frames[0, :, -mask_reft_len:].clone().detach()
+                prev_refer = rearrange(prev_refer, "c t h w -> t c h w").cpu()
+                batch["refer_t_pixel_values"][:mask_reft_len] = prev_refer
+
+            batch["refer_t_pixel_values"] = rearrange(
+                batch["refer_t_pixel_values"], "t c h w -> 1 c t h w"
             )
-            batch["face_pixel_values"] = rearrange(
-                torch.tensor(np.stack(face_images[start:end]) / 127.5 - 1),
-                "t h w c -> 1 c t h w",
-            )
-
-            batch["refer_pixel_values"] = rearrange(
-                torch.tensor(clip_ref_image / 127.5 - 1), "h w c -> 1 c h w"
-            )
-
-            if start > 0:
-                batch["refer_t_pixel_values"] = rearrange(
-                    out_frames[0, :, -refert_num:].clone().detach(),
-                    "c t h w -> t c h w",
-                )
-
-            batch["refer_t_pixel_values"] = rearrange(batch["refer_t_pixel_values"],
-                                            "t c h w -> 1 c t h w",
-                                            )
 
             if replace_flag:
+                bg_window = self.slice_clip_sequence(bg_images, start, chunk_len, clip_len)
+                mask_window = self.slice_clip_sequence(mask_images, start, chunk_len, clip_len)
                 batch["bg_pixel_values"] = rearrange(
-                    torch.tensor(np.stack(bg_images[start:end]) / 127.5 - 1),
+                    torch.tensor(np.stack(bg_window) / 127.5 - 1),
                     "t h w c -> 1 c t h w",
                 )
 
                 batch["mask_pixel_values"] = rearrange(
-                    torch.tensor(np.stack(mask_images[start:end])[:, :, :, None]),
+                    torch.tensor(np.stack(mask_window)[:, :, :, None]),
                     "t h w c -> 1 t c h w",
                 )
-                
 
             for key, value in batch.items():
                 if isinstance(value, torch.Tensor):
@@ -782,14 +892,16 @@ class WanAnimate:
 
                 x0 = [x.to(dtype=torch.float32) for x in x0]
                 out_frames = torch.stack(self.vae.decode([x0[0][:, 1:]]))
-                
-                if start != 0:
-                    out_frames = out_frames[:, :, refert_num:]
+
+                out_frames = out_frames[:, :, :chunk_len]
+                if mask_reft_len > 0:
+                    out_frames = out_frames[:, :, mask_reft_len:]
 
                 all_out_frames.append(out_frames.cpu())
 
-                start += clip_len - refert_num
-                end += clip_len - refert_num
+                produced = chunk_len - mask_reft_len
+                produced = max(produced, 1)
+                start += produced
 
         videos = torch.cat(all_out_frames, dim=2)[:, :, :real_frame_len]
         return videos[0] if self.rank == 0 else None

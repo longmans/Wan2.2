@@ -305,7 +305,9 @@ The input video should be preprocessed into several materials before be feed int
 python ./wan/modules/animate/preprocess/preprocess_data.py \
     --ckpt_path ./Wan2.2-Animate-14B/process_checkpoint \
     --video_path ./examples/wan_animate/animate/video.mp4 \
-    --refer_path ./examples/wan_animate/animate/image.jpeg \
+    --refer_front_path ./examples/wan_animate/animate/front.jpg \
+    --refer_side_path ./examples/wan_animate/animate/side.jpg \
+    --refer_back_path ./examples/wan_animate/animate/back.jpg \
     --save_path ./examples/wan_animate/animate/process_results \
     --resolution_area 1280 720 \
     --retarget_flag \
@@ -316,7 +318,7 @@ python ./wan/modules/animate/preprocess/preprocess_data.py \
 python ./wan/modules/animate/preprocess/preprocess_data.py \
     --ckpt_path ./Wan2.2-Animate-14B/process_checkpoint \
     --video_path ./examples/wan_animate/replace/video.mp4 \
-    --refer_path ./examples/wan_animate/replace/image.jpeg \
+    --refer_front_path ./examples/wan_animate/replace/image.jpeg \
     --save_path ./examples/wan_animate/replace/process_results \
     --resolution_area 1280 720 \
     --iterations 3 \
@@ -325,7 +327,9 @@ python ./wan/modules/animate/preprocess/preprocess_data.py \
     --h_len 1 \
     --replace_flag
 ```
-> ✅ **Multiple reference images**: Provide `--refer_schedule /path/to/ref_schedule.json` when running `preprocess_data.py` (or manually place the file under the output directory as `src_ref_schedule.json`). `generate.py` automatically picks it up whenever the file is present.
+> ✅ **Multiple reference images & auto-orientation**:
+> * Provide `--refer_schedule /path/to/ref_schedule.json` when running `preprocess_data.py` (or manually place the file under the output directory as `src_ref_schedule.json`). `generate.py` automatically picks it up whenever the file is present.
+> * `--refer_front_path` (or the legacy `--refer_path`) is now required; `--refer_side_path` and `--refer_back_path` are optional and fall back to the front image if not supplied. During preprocessing we estimate each frame's facing direction and store it in `src_orientation_track.json`. Generation consumes that track to pick the best-matching reference (front/side/back) per frame and will break clips automatically when the actor turns, so the model no longer hallucinates when the character rotates.
 
 Example `ref_schedule.json` structure:
 
