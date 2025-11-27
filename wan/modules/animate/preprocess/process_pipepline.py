@@ -35,7 +35,32 @@ class ProcessPipeline():
         if flux_kontext_path is not None:
             self.flux_kontext = FluxKontextPipeline.from_pretrained(flux_kontext_path, torch_dtype=torch.bfloat16).to("cuda")
 
-    def __call__(self, video_path, refer_image_path, output_path, resolution_area=[1280, 720], fps=30, iterations=3, k=7, w_len=1, h_len=1, retarget_flag=False, use_flux=False, replace_flag=False):
+    def __call__(self, video_path, refer_image_path=None, refer_image_paths=None, output_path=None, resolution_area=[1280, 720], fps=30, iterations=3, k=7, w_len=1, h_len=1, retarget_flag=False, use_flux=False, replace_flag=False):
+        if output_path is None:
+            raise ValueError("output_path must be provided")
+
+        refer_paths = []
+        if refer_image_paths is not None:
+            refer_paths.extend(refer_image_paths)
+        if refer_image_path is not None:
+            refer_paths.insert(0, refer_image_path)
+
+        deduped_paths = []
+        seen_paths = set()
+        for path in refer_paths:
+            if path is None:
+                continue
+            abs_path = os.path.abspath(path)
+            if abs_path in seen_paths:
+                continue
+            seen_paths.add(abs_path)
+            deduped_paths.append(path)
+
+        if not deduped_paths:
+            raise ValueError("At least one reference image path must be provided")
+
+        logger.info(f"Processing reference images: {deduped_paths}")
+        refer_img = self._prepare_reference_images(deduped_paths, output_path)
         if replace_flag:
 
             video_reader = VideoReader(video_path)
@@ -79,12 +104,6 @@ class ProcessPipeline():
                 face_image = cv2.resize(face_image, (512, 512))
                 face_images.append(face_image)
 
-            logger.info(f"Processing reference image: {refer_image_path}")
-            refer_img = cv2.imread(refer_image_path)
-            src_ref_path = os.path.join(output_path, 'src_ref.png')
-            shutil.copy(refer_image_path, src_ref_path)
-            refer_img = refer_img[..., ::-1]
-
             refer_img = padding_resize(refer_img, height, width)
             logger.info(f"Processing template video: {video_path}")
             tpl_retarget_pose_metas = [AAPoseMeta.from_humanapi_meta(meta) for meta in tpl_pose_metas]
@@ -124,12 +143,6 @@ class ProcessPipeline():
             mpy.ImageSequenceClip(aug_masks_new, fps=fps).write_videofile(src_mask_path)
             return True
         else:
-            logger.info(f"Processing reference image: {refer_image_path}")
-            refer_img = cv2.imread(refer_image_path)
-            src_ref_path = os.path.join(output_path, 'src_ref.png')
-            shutil.copy(refer_image_path, src_ref_path)
-            refer_img = refer_img[..., ::-1]
-            
             refer_img = resize_by_area(refer_img, resolution_area[0] * resolution_area[1], divisor=16)
             
             refer_pose_meta = self.pose2d([refer_img])[0]
@@ -341,7 +354,29 @@ class ProcessPipeline():
                     all_mask.append(out_mask)
 
         return all_mask
-    
+
+    def _prepare_reference_images(self, reference_paths, output_path):
+        primary_refer_img = None
+        for idx, path in enumerate(reference_paths):
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Reference image not found: {path}")
+
+            dst_name = 'src_ref.png' if idx == 0 else f'src_ref_{idx}.png'
+            dst_path = os.path.join(output_path, dst_name)
+            if os.path.abspath(path) != os.path.abspath(dst_path):
+                shutil.copy(path, dst_path)
+
+            if idx == 0:
+                refer_img = cv2.imread(path)
+                if refer_img is None:
+                    raise ValueError(f"Failed to read reference image: {path}")
+                primary_refer_img = refer_img[..., ::-1]
+
+        if primary_refer_img is None:
+            raise ValueError("Primary reference image could not be loaded")
+
+        return primary_refer_img
+
     def convert_list_to_array(self, metas):
         metas_list = []
         for meta in metas:
@@ -351,4 +386,3 @@ class ProcessPipeline():
                 meta[key] = value
             metas_list.append(meta)
         return metas_list
-

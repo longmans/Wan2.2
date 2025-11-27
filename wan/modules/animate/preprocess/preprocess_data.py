@@ -1,7 +1,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import os
 import argparse
-import shutil
+import json
 from process_pipepline import ProcessPipeline
 
 
@@ -101,6 +101,58 @@ def _parse_args():
     return args
 
 
+def _resolve_reference_path(path_value, schedule_dir, save_path):
+    expanded_path = os.path.expanduser(path_value)
+    candidates = []
+    if os.path.isabs(expanded_path):
+        candidates.append(expanded_path)
+    else:
+        candidates.append(os.path.join(schedule_dir, expanded_path))
+        candidates.append(os.path.join(save_path, expanded_path))
+        candidates.append(os.path.abspath(expanded_path))
+
+    for candidate in candidates:
+        candidate = os.path.abspath(candidate)
+        if os.path.isfile(candidate):
+            return candidate
+
+    raise FileNotFoundError(
+        f"Reference image '{path_value}' could not be resolved relative to {schedule_dir} or {save_path}."
+    )
+
+
+def _load_reference_schedule(schedule_path, save_path):
+    schedule_src = os.path.abspath(schedule_path)
+    with open(schedule_src, "r", encoding="utf-8") as schedule_file:
+        try:
+            schedule_data = json.load(schedule_file)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in refer_schedule file {schedule_src}: {exc}") from exc
+
+    intervals = schedule_data.get("intervals", [])
+    if not isinstance(intervals, list):
+        raise ValueError("refer_schedule must contain an 'intervals' list")
+
+    schedule_dir = os.path.dirname(schedule_src)
+    interval_records = []
+    for idx, interval in enumerate(intervals):
+        if not isinstance(interval, dict):
+            raise ValueError(f"Interval entry at index {idx} must be a JSON object")
+        path_value = interval.get("path")
+        if not path_value:
+            raise ValueError(f"Interval entry at index {idx} is missing the 'path' field")
+        resolved_path = _resolve_reference_path(path_value, schedule_dir, save_path)
+        interval_records.append(
+            {
+                "index": idx,
+                "original_path": path_value,
+                "resolved_path": resolved_path,
+            }
+        )
+
+    return schedule_data, interval_records
+
+
 if __name__ == '__main__':
     args = _parse_args()
     args_dict = vars(args)
@@ -108,6 +160,33 @@ if __name__ == '__main__':
 
     assert len(args.resolution_area) == 2, "resolution_area should be a list of two integers [width, height]"
     assert not args.use_flux or args.retarget_flag, "Image editing with FLUX can only be used when pose retargeting is enabled."
+
+    schedule_data = None
+    schedule_records = []
+    if args.refer_schedule is not None:
+        if not os.path.isfile(args.refer_schedule):
+            raise FileNotFoundError(f"refer_schedule file not found: {args.refer_schedule}")
+        schedule_data, schedule_records = _load_reference_schedule(args.refer_schedule, args.save_path)
+
+    reference_candidates = []
+    if args.refer_path is not None:
+        if not os.path.isfile(args.refer_path):
+            raise FileNotFoundError(f"refer_path file not found: {args.refer_path}")
+        reference_candidates.append(os.path.abspath(os.path.expanduser(args.refer_path)))
+
+    reference_candidates.extend(record["resolved_path"] for record in schedule_records)
+
+    deduped_references = []
+    seen_refs = set()
+    for path in reference_candidates:
+        abs_path = os.path.abspath(path)
+        if abs_path in seen_refs:
+            continue
+        seen_refs.add(abs_path)
+        deduped_references.append(abs_path)
+
+    if not deduped_references:
+        raise ValueError("At least one reference image must be provided via --refer_path or refer_schedule intervals.")
 
     pose2d_checkpoint_path = os.path.join(args.ckpt_path, 'pose2d/vitpose_h_wholebody.onnx')
     det_checkpoint_path = os.path.join(args.ckpt_path, 'det/yolov10m.onnx')
@@ -117,7 +196,8 @@ if __name__ == '__main__':
     process_pipeline = ProcessPipeline(det_checkpoint_path=det_checkpoint_path, pose2d_checkpoint_path=pose2d_checkpoint_path, sam_checkpoint_path=sam2_checkpoint_path, flux_kontext_path=flux_kontext_path)
     os.makedirs(args.save_path, exist_ok=True)
     process_pipeline(video_path=args.video_path, 
-                     refer_image_path=args.refer_path, 
+                     refer_image_path=deduped_references[0],
+                     refer_image_paths=deduped_references,
                      output_path=args.save_path,
                      resolution_area=args.resolution_area,
                      fps=args.fps,
@@ -129,9 +209,19 @@ if __name__ == '__main__':
                      use_flux=args.use_flux,
                      replace_flag=args.replace_flag)
 
-    if args.refer_schedule is not None:
-        if not os.path.isfile(args.refer_schedule):
-            raise FileNotFoundError(f"refer_schedule file not found: {args.refer_schedule}")
+    if schedule_data is not None:
+        ref_mapping = {}
+        for idx, abs_path in enumerate(deduped_references):
+            dst_name = 'src_ref.png' if idx == 0 else f'src_ref_{idx}.png'
+            ref_mapping[abs_path] = dst_name
+
+        for record in schedule_records:
+            resolved_path = os.path.abspath(record["resolved_path"])
+            if resolved_path not in ref_mapping:
+                raise ValueError(f"Schedule reference {resolved_path} was not processed")
+            schedule_data["intervals"][record["index"]]["path"] = ref_mapping[resolved_path]
+
         schedule_dst = os.path.join(args.save_path, 'src_ref_schedule.json')
-        shutil.copy(args.refer_schedule, schedule_dst)
+        with open(schedule_dst, 'w', encoding='utf-8') as schedule_file:
+            json.dump(schedule_data, schedule_file, indent=2)
         print(f"Reference schedule saved to {schedule_dst}")
