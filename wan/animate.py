@@ -239,6 +239,7 @@ class WanAnimate:
             img = cv2.imread(image_path)[..., ::-1]
             img = self.padding_resize(img, height=height, width=width)
             img_tensor = torch.tensor(img / 127.5 - 1, dtype=torch.float32)
+            img_tensor = img_tensor.permute(2, 0, 1).contiguous()
             return img_tensor
         except Exception as e:
             logging.warning(f"Failed to load image {image_path}: {e}")
