@@ -244,6 +244,26 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to use relighting lora.")
+    parser.add_argument(
+        "--ref_front",
+        type=str,
+        default=None,
+        help="Path to the front reference image for multi-view guidance.")
+    parser.add_argument(
+        "--ref_back",
+        type=str,
+        default=None,
+        help="Path to the back reference image for multi-view guidance (optional).")
+    parser.add_argument(
+        "--ref_side",
+        type=str,
+        default=None,
+        help="Path to the side reference image for multi-view guidance (optional).")
+    parser.add_argument(
+        "--multiview_blend_weights",
+        type=str,
+        default="0.6,0.2,0.2",
+        help="Blending weights for front, back, side views (default: front=0.6, back=0.2, side=0.2).")
     
     # following args only works for s2v
     parser.add_argument(
@@ -468,6 +488,15 @@ def generate(args):
         )
 
         logging.info(f"Generating video ...")
+        # Parse blending weights
+        weights = [float(w.strip()) for w in args.multiview_blend_weights.split(',')]
+        multiview_config = {
+            'ref_front': args.ref_front,
+            'ref_back': args.ref_back,
+            'ref_side': args.ref_side,
+            'weights': {'front': weights[0], 'back': weights[1], 'side': weights[2]}
+        } if args.ref_front else None
+        
         video = wan_animate.generate(
             src_root_path=args.src_root_path,
             replace_flag=args.replace_flag,
@@ -478,7 +507,8 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            multiview_config=multiview_config)
     elif "s2v" in args.task:
         logging.info("Creating WanS2V pipeline.")
         wan_s2v = wan.WanS2V(

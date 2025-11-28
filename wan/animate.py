@@ -222,6 +222,87 @@ class WanAnimate:
         target_len = real_len + extra
         return target_len
 
+    def _load_image_for_clip(self, image_path, height, width):
+        """Load and preprocess image for CLIP model.
+        
+        Args:
+            image_path: Path to the image file
+            height: Target height
+            width: Target width
+            
+        Returns:
+            torch.Tensor: Preprocessed image tensor
+        """
+        try:
+            if image_path is None:
+                return None
+            img = cv2.imread(image_path)[..., ::-1]
+            img = self.padding_resize(img, height=height, width=width)
+            img_tensor = torch.tensor(img / 127.5 - 1, dtype=torch.float32)
+            return img_tensor
+        except Exception as e:
+            logging.warning(f"Failed to load image {image_path}: {e}")
+            return None
+
+    def _fuse_multiview_context(self, multiview_config, ref_pixel_values, clip_context_primary):
+        """Fuse multi-view visual contexts.
+        
+        Args:
+            multiview_config: Dict containing ref_front, ref_back, ref_side paths and weights
+            ref_pixel_values: Reference pixel values for dimension reference
+            clip_context_primary: Primary clip context (from ref_front or default)
+            
+        Returns:
+            torch.Tensor: Fused clip context with shape (batch, 1280)
+        """
+        _, _, H, W = ref_pixel_values.shape
+        weights = multiview_config.get('weights', {'front': 0.6, 'back': 0.2, 'side': 0.2})
+        
+        # Normalize weights
+        total_weight = sum(weights.values())
+        weights = {k: v / total_weight for k, v in weights.items()}
+        
+        fused_context = None
+        
+        # Process front view (always required)
+        if multiview_config.get('ref_front'):
+            front_img = self._load_image_for_clip(multiview_config['ref_front'], H, W)
+            if front_img is not None:
+                front_context = self.clip.visual([front_img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
+                fused_context = weights['front'] * front_context
+                logging.info(f"Front context weight: {weights['front']:.2f}")
+            else:
+                # Fallback to primary if loading fails
+                return clip_context_primary
+        
+        # Process back view (optional)
+        if multiview_config.get('ref_back') and weights['back'] > 0:
+            back_img = self._load_image_for_clip(multiview_config['ref_back'], H, W)
+            if back_img is not None:
+                back_context = self.clip.visual([back_img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
+                if fused_context is None:
+                    fused_context = weights['back'] * back_context
+                else:
+                    fused_context = fused_context + weights['back'] * back_context
+                logging.info(f"Back context weight: {weights['back']:.2f}")
+        
+        # Process side view (optional)
+        if multiview_config.get('ref_side') and weights['side'] > 0:
+            side_img = self._load_image_for_clip(multiview_config['ref_side'], H, W)
+            if side_img is not None:
+                side_context = self.clip.visual([side_img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
+                if fused_context is None:
+                    fused_context = weights['side'] * side_context
+                else:
+                    fused_context = fused_context + weights['side'] * side_context
+                logging.info(f"Side context weight: {weights['side']:.2f}")
+        
+        if fused_context is None:
+            logging.warning("Multi-view fusion resulted in None, using primary context")
+            return clip_context_primary
+        
+        return fused_context
+
 
     def get_i2v_mask(self, lat_t, lat_h, lat_w, mask_len=1, mask_pixel_values=None, device="cuda"):
         if mask_pixel_values is None:
@@ -308,6 +389,7 @@ class WanAnimate:
         n_prompt="",
         seed=-1,
         offload_model=True,
+        multiview_config=None,
     ):
         r"""
         Generates video frames from input image using diffusion process.
@@ -339,6 +421,14 @@ class WanAnimate:
                 Random seed for noise generation. If -1, use random seed
             offload_model (`bool`, *optional*, defaults to True):
                 If True, offloads models to CPU during generation to save VRAM
+            multiview_config (`dict`, *optional*, defaults to None):
+                Multi-view reference configuration. Example:
+                {
+                    'ref_front': 'path/to/front.jpg',
+                    'ref_back': 'path/to/back.jpg' (optional),
+                    'ref_side': 'path/to/side.jpg' (optional),
+                    'weights': {'front': 0.6, 'back': 0.2, 'side': 0.2}
+                }
 
         Returns:
             torch.Tensor:
@@ -518,6 +608,18 @@ class WanAnimate:
 
                 img = ref_pixel_values[0, :, 0]
                 clip_context = self.clip.visual([img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
+
+                # Multi-view fusion for clip context
+                if multiview_config is not None:
+                    try:
+                        clip_context = self._fuse_multiview_context(
+                            multiview_config, 
+                            ref_pixel_values, 
+                            clip_context
+                        )
+                    except Exception as e:
+                        logging.warning(f"Multi-view fusion failed: {e}. Using single view instead.")
+                        pass
 
                 if mask_reft_len > 0:
                     if replace_flag:
