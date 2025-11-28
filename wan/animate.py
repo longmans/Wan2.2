@@ -255,7 +255,14 @@ class WanAnimate:
         Returns:
             torch.Tensor: Fused clip context with shape (batch, 1280)
         """
-        _, _, H, W = ref_pixel_values.shape
+        if ref_pixel_values.ndim == 5:
+            _, _, _, H, W = ref_pixel_values.shape
+        elif ref_pixel_values.ndim == 4:
+            _, _, H, W = ref_pixel_values.shape
+        else:
+            raise ValueError(
+                f"ref_pixel_values must be 4D or 5D, got shape {ref_pixel_values.shape}"
+            )
         weights = multiview_config.get('weights', {'front': 0.6, 'back': 0.2, 'side': 0.2})
         
         # Normalize weights
