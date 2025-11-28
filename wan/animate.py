@@ -276,6 +276,7 @@ class WanAnimate:
         if multiview_config.get('ref_front'):
             front_img = self._load_image_for_clip(multiview_config['ref_front'], H, W)
             if front_img is not None:
+                front_img = front_img.to(device=self.device, dtype=self.clip.dtype)
                 front_context = self.clip.visual([front_img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
                 fused_context = weights['front'] * front_context
                 logging.info(f"Front context weight: {weights['front']:.2f}")
@@ -287,6 +288,7 @@ class WanAnimate:
         if multiview_config.get('ref_back') and weights['back'] > 0:
             back_img = self._load_image_for_clip(multiview_config['ref_back'], H, W)
             if back_img is not None:
+                back_img = back_img.to(device=self.device, dtype=self.clip.dtype)
                 back_context = self.clip.visual([back_img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
                 if fused_context is None:
                     fused_context = weights['back'] * back_context
@@ -298,6 +300,7 @@ class WanAnimate:
         if multiview_config.get('ref_side') and weights['side'] > 0:
             side_img = self._load_image_for_clip(multiview_config['ref_side'], H, W)
             if side_img is not None:
+                side_img = side_img.to(device=self.device, dtype=self.clip.dtype)
                 side_context = self.clip.visual([side_img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
                 if fused_context is None:
                     fused_context = weights['side'] * side_context
