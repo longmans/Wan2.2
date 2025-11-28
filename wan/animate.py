@@ -894,14 +894,10 @@ class WanAnimate:
                 out_frames = torch.stack(self.vae.decode([x0[0][:, 1:]]))
 
                 out_frames = out_frames[:, :, :chunk_len]
-                if mask_reft_len > 0:
-                    out_frames = out_frames[:, :, mask_reft_len:]
 
                 all_out_frames.append(out_frames.cpu())
 
-                produced = chunk_len - mask_reft_len
-                produced = max(produced, 1)
-                start += produced
+                start += chunk_len
 
         videos = torch.cat(all_out_frames, dim=2)[:, :, :real_frame_len]
         return videos[0] if self.rank == 0 else None
