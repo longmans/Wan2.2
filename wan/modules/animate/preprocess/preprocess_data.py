@@ -27,6 +27,11 @@ def _parse_args():
         default=None,
         help="The path to the refererence image.")
     parser.add_argument(
+        "--front_refer_path",
+        type=str,
+        default=None,
+        help="The path to a fixed frontal reference image. When provided, it is treated as the primary reference.")
+    parser.add_argument(
         "--refer_schedule",
         type=str,
         default=None,
@@ -169,6 +174,10 @@ if __name__ == '__main__':
         schedule_data, schedule_records = _load_reference_schedule(args.refer_schedule, args.save_path)
 
     reference_candidates = []
+    if args.front_refer_path is not None:
+        if not os.path.isfile(args.front_refer_path):
+            raise FileNotFoundError(f"front_refer_path file not found: {args.front_refer_path}")
+        reference_candidates.append(os.path.abspath(os.path.expanduser(args.front_refer_path)))
     if args.refer_path is not None:
         if not os.path.isfile(args.refer_path):
             raise FileNotFoundError(f"refer_path file not found: {args.refer_path}")

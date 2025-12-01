@@ -7,6 +7,7 @@ python ./wan/modules/animate/preprocess/preprocess_data.py \
     --resolution_area 720 1280 \
     --retarget_flag \
     --use_flux \
-    --refer_schedule ./ref_schedule.json
+    --refer_schedule ./ref_schedule.json \
+    --front_refer_path ./examples/wan_animate/animate/11_2.jpg
 
 python generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_root_path $save_path --refert_num 5

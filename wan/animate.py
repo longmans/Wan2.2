@@ -490,6 +490,12 @@ class WanAnimate:
             src_face_path=src_face_path,
             src_ref_path=src_ref_path,
         )
+
+        # Use the primary reference image (src_ref.png) as the fixed
+        # frontal reference for temporal guidance when refert_num == 5.
+        front_ref_tensor = torch.tensor(
+            refer_images / 127.5 - 1.0, dtype=torch.float32, device=self.device
+        ).permute(2, 0, 1)
         
         if not self.t5_cpu:
             self.text_encoder.model.to(self.device)
@@ -623,6 +629,19 @@ class WanAnimate:
                         prev_out_frames[0, :, -refert_num:].clone().detach(),
                         "c t h w -> t c h w",
                     )
+                    if refert_num == 5:
+                        fr = front_ref_tensor.to(
+                            device=batch["refer_t_pixel_values"].device,
+                            dtype=batch["refer_t_pixel_values"].dtype,
+                        )
+                        if fr.shape == batch["refer_t_pixel_values"][0].shape:
+                            batch["refer_t_pixel_values"][0] = fr
+                        else:
+                            logging.warning(
+                                "Front reference shape %s does not match temporal guidance frame shape %s.",
+                                fr.shape,
+                                batch["refer_t_pixel_values"][0].shape,
+                            )
                     mask_reft_len = refert_num
                 else:
                     mask_reft_len = 0
