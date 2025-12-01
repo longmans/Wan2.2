@@ -9,4 +9,4 @@ python ./wan/modules/animate/preprocess/preprocess_data.py \
     --use_flux \
     --refer_schedule ./ref_schedule.json
 
-python generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_root_path $save_path --refert_num 1
+python generate.py --task animate-14B --ckpt_dir ./Wan2.2-Animate-14B/ --src_root_path $save_path --refert_num 5
