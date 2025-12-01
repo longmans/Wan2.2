@@ -24,28 +24,18 @@ RUN_ROOT = PROJECT_ROOT / "examples" / "wan_animate" / "gradio_runs"
 # All selectable resolutions
 RESOLUTION_OPTIONS = [
     "720*1280",   # default
-    "1280*720"
+    "1280*720",
 ]
 DEFAULT_RESOLUTION = "720*1280"
 
 
 def _parse_resolution(res_str: str) -> Tuple[int, int]:
+    """Parse strings like '720*1280' into (width, height)."""
     try:
         w_str, h_str = res_str.split("*")
         return int(w_str), int(h_str)
     except Exception as exc:
         raise ValueError(f"Invalid resolution format: {res_str}") from exc
-
-
-def _choose_base_size_for_animate(res_str: str) -> str:
-    """
-    animate-14B 在 generate.py 里只显式支持 720*1280 / 1280*720。
-    这里根据长宽比自动映射到其中一个，用于 --size 参数。
-    """
-    w, h = _parse_resolution(res_str)
-    if h >= w:
-        return "720*1280"
-    return "1280*720"
 
 
 def _build_ref_schedule(
@@ -237,12 +227,12 @@ def run_animate_pipeline(
     if not ref_images:
         return "请至少上传一张参考图片。", None
 
-    # 解析分辨率与 animate-14B 的基础 size
     try:
         target_w, target_h = _parse_resolution(resolution)
     except Exception as exc:
         return f"分辨率解析失败: {exc}", None
-    base_size_for_generate = _choose_base_size_for_animate(resolution)
+
+    base_size_for_generate = resolution
 
     # 为本次运行创建独立目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -327,7 +317,9 @@ def run_animate_pipeline(
         "--size",
         base_size_for_generate,
         "--save_file",
-        str(base_output_video)
+        str(base_output_video),
+        "--offload_model", 
+        "False"
     ]
 
     try:
@@ -355,7 +347,7 @@ def build_demo():
 上传待复刻视频和一张或多张参考图片，可为每张参考图片设置多个时间区间。
 
 - 每张参考图在下方“参考图片时间区间”表格中会自动生成一行，左侧展示索引，右侧可填写形如 `0-2,5-8` 的区间列表（多个区间用逗号隔开，可填写整数或小数）。
-- 区间依旧视为左闭右开 `[start_sec, end_sec)`，若填写顺序相反（如 `5-4`）将自动按时间从小到大排序。
+- 区间为左闭右开 `[start_sec, end_sec)`，也就是包含开始的数值，不包含结束的数值
 """
         )
 
@@ -385,7 +377,7 @@ def build_demo():
             datatype=["number", "str"],
             row_count=(0, "dynamic"),
             col_count=2,
-            label="参考图片时间区间（右侧输入 0-2,5-8 形式的区间，逗号分隔）",
+            label="参考图片时间区间（右侧输入 0-2,5-8 形式的区间，逗号分隔, 区间为左闭右开 `[start_sec, end_sec)`，也就是包含开始的数值，不包含结束的数值）",
             type="array",
         )
 
@@ -426,4 +418,4 @@ def build_demo():
 if __name__ == "__main__":
     os.makedirs(RUN_ROOT, exist_ok=True)
     demo = build_demo()
-    demo.queue().launch(share=True)
+    demo.queue().launch(share=True, server_name="0.0.0.0", server_port=8888)
