@@ -527,269 +527,319 @@ class WanAnimate:
             width=width,
             schedule_filename=schedule_filename,
         )
-        start = 0
-        end = clip_len
+        # Build contiguous reference intervals so that each clip only outputs
+        # frames that share the same reference image. Around a reference change
+        # we allow the clip window to extend slightly before the boundary, but
+        # we treat those earlier frames as "preheat" and drop them from the
+        # final output.
+        ref_intervals = []
+        idx = 0
+        while idx < target_len:
+            cur_ref = reference_track[idx]
+            next_idx = idx + 1
+            while next_idx < target_len and reference_track[next_idx] == cur_ref:
+                next_idx += 1
+            ref_intervals.append((idx, next_idx, cur_ref))
+            idx = next_idx
+
+        logging.info("Reference intervals: %d segments", len(ref_intervals))
+        for seg_idx, (s, e, r) in enumerate(ref_intervals):
+            logging.debug(
+                "Ref interval %d: frames [%d, %d), ref=%s",
+                seg_idx,
+                s,
+                e,
+                r,
+            )
+
         all_out_frames = []
-        while True:
-            if start + refert_num >= len(cond_images):
-                break
+        prev_out_frames = None
+        cur_frame = 0
 
-            if start == 0:
-                mask_reft_len = 0
-            else:
-                mask_reft_len = refert_num
+        for seg_idx, (seg_start, seg_end, seg_ref_path) in enumerate(ref_intervals):
+            # Sanity: generation should progress sequentially
+            if cur_frame < seg_start:
+                cur_frame = seg_start
 
-            clip_ref_path = reference_track[start]
-            clip_ref_image = reference_cache[clip_ref_path]
-            clip_frame_end = min(end, target_len)
-            if any(reference_track[idx] != clip_ref_path for idx in range(start + 1, clip_frame_end)):
-                logging.warning(
-                    "Clip frames [%d, %d) span multiple reference images; using %s for this chunk.",
-                    start,
-                    clip_frame_end,
-                    clip_ref_path,
+            while cur_frame < seg_end:
+                # Decide clip window [win_start, win_start + clip_len).
+                # We prefer to start a bit before cur_frame (by refert_num frames)
+                # so that these earlier frames act as temporal "preheat".
+                if cur_frame == 0:
+                    win_start = 0
+                else:
+                    win_start = max(cur_frame - refert_num, 0)
+                    max_start = max(target_len - clip_len, 0)
+                    win_start = min(win_start, max_start)
+
+                win_end = win_start + clip_len
+
+                # How many frames of this clip will be kept (not dropped)?
+                drop_front = cur_frame - win_start
+                max_keep = clip_len - drop_front
+                keep_len = min(max_keep, seg_end - cur_frame)
+
+                logging.debug(
+                    "Segment %d clip: seg=[%d,%d), cur_frame=%d, win=[%d,%d), "
+                    "drop_front=%d, keep_len=%d, ref=%s",
+                    seg_idx,
+                    seg_start,
+                    seg_end,
+                    cur_frame,
+                    win_start,
+                    win_end,
+                    drop_front,
+                    keep_len,
+                    seg_ref_path,
                 )
 
-            batch = {
-                        "conditioning_pixel_values": torch.zeros(1, 3, clip_len, height, width),
-                        "bg_pixel_values": torch.zeros(1, 3, clip_len, height, width),
-                        "mask_pixel_values": torch.zeros(1, 1, clip_len, height, width),
-                        "face_pixel_values": torch.zeros(1, 3, clip_len, 512, 512),
-                        "refer_pixel_values": torch.zeros(1, 3, height, width),
-                        "refer_t_pixel_values": torch.zeros(refert_num, 3, height, width)
-                    }   
+                clip_ref_path = seg_ref_path
+                clip_ref_image = reference_cache[clip_ref_path]
 
-            batch["conditioning_pixel_values"] = rearrange(
-                torch.tensor(np.stack(cond_images[start:end]) / 127.5 - 1),
-                "t h w c -> 1 c t h w",
-            )
-            batch["face_pixel_values"] = rearrange(
-                torch.tensor(np.stack(face_images[start:end]) / 127.5 - 1),
-                "t h w c -> 1 c t h w",
-            )
+                batch = {
+                            "conditioning_pixel_values": torch.zeros(1, 3, clip_len, height, width),
+                            "bg_pixel_values": torch.zeros(1, 3, clip_len, height, width),
+                            "mask_pixel_values": torch.zeros(1, 1, clip_len, height, width),
+                            "face_pixel_values": torch.zeros(1, 3, clip_len, 512, 512),
+                            "refer_pixel_values": torch.zeros(1, 3, height, width),
+                            "refer_t_pixel_values": torch.zeros(refert_num, 3, height, width)
+                        }   
 
-            batch["refer_pixel_values"] = rearrange(
-                torch.tensor(clip_ref_image / 127.5 - 1), "h w c -> 1 c h w"
-            )
-
-            if start > 0:
-                batch["refer_t_pixel_values"] = rearrange(
-                    out_frames[0, :, -refert_num:].clone().detach(),
-                    "c t h w -> t c h w",
+                batch["conditioning_pixel_values"] = rearrange(
+                    torch.tensor(np.stack(cond_images[win_start:win_end]) / 127.5 - 1),
+                    "t h w c -> 1 c t h w",
                 )
-
-            batch["refer_t_pixel_values"] = rearrange(batch["refer_t_pixel_values"],
-                                            "t c h w -> 1 c t h w",
-                                            )
-
-            if replace_flag:
-                batch["bg_pixel_values"] = rearrange(
-                    torch.tensor(np.stack(bg_images[start:end]) / 127.5 - 1),
+                batch["face_pixel_values"] = rearrange(
+                    torch.tensor(np.stack(face_images[win_start:win_end]) / 127.5 - 1),
                     "t h w c -> 1 c t h w",
                 )
 
-                batch["mask_pixel_values"] = rearrange(
-                    torch.tensor(np.stack(mask_images[start:end])[:, :, :, None]),
-                    "t h w c -> 1 t c h w",
+                batch["refer_pixel_values"] = rearrange(
+                    torch.tensor(clip_ref_image / 127.5 - 1), "h w c -> 1 c h w"
                 )
-                
 
-            for key, value in batch.items():
-                if isinstance(value, torch.Tensor):
-                    batch[key] = value.to(device=self.device, dtype=torch.bfloat16)
+                if prev_out_frames is not None:
+                    batch["refer_t_pixel_values"] = rearrange(
+                        prev_out_frames[0, :, -refert_num:].clone().detach(),
+                        "c t h w -> t c h w",
+                    )
+                    mask_reft_len = refert_num
+                else:
+                    mask_reft_len = 0
 
-            ref_pixel_values = batch["refer_pixel_values"]
-            refer_t_pixel_values = batch["refer_t_pixel_values"]
-            conditioning_pixel_values = batch["conditioning_pixel_values"]
-            face_pixel_values = batch["face_pixel_values"]
+                batch["refer_t_pixel_values"] = rearrange(batch["refer_t_pixel_values"],
+                                                "t c h w -> 1 c t h w",
+                                                )
 
-            B, _, H, W = ref_pixel_values.shape
-            T = clip_len
-            lat_h = H // 8
-            lat_w = W // 8
-            lat_t = T // 4 + 1
-            target_shape = [lat_t + 1, lat_h, lat_w]
-            noise = [
-                torch.randn(
-                    16,
-                    target_shape[0],
-                    target_shape[1],
-                    target_shape[2],
-                    dtype=torch.float32,
-                    device=self.device,
-                    generator=seed_g,
-                )
-            ]
-        
-            max_seq_len = int(math.ceil(np.prod(target_shape) // 4 / self.sp_size)) * self.sp_size
-            if max_seq_len % self.sp_size != 0:
-                raise ValueError(f"max_seq_len {max_seq_len} is not divisible by sp_size {self.sp_size}")
+                if replace_flag:
+                    batch["bg_pixel_values"] = rearrange(
+                        torch.tensor(np.stack(bg_images[win_start:win_end]) / 127.5 - 1),
+                        "t h w c -> 1 c t h w",
+                    )
 
-            with (
-                torch.autocast(device_type=str(self.device), dtype=torch.bfloat16, enabled=True),
-                torch.no_grad()
-            ):
-                if sample_solver == 'unipc':
-                    sample_scheduler = FlowUniPCMultistepScheduler(
-                        num_train_timesteps=self.num_train_timesteps,
-                        shift=1,
-                        use_dynamic_shifting=False)
-                    sample_scheduler.set_timesteps(
-                        sampling_steps, device=self.device, shift=shift)
-                    timesteps = sample_scheduler.timesteps
-                elif sample_solver == 'dpm++':
-                    sample_scheduler = FlowDPMSolverMultistepScheduler(
-                        num_train_timesteps=self.num_train_timesteps,
-                        shift=1,
-                        use_dynamic_shifting=False)
-                    sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
-                    timesteps, _ = retrieve_timesteps(
-                        sample_scheduler,
+                    batch["mask_pixel_values"] = rearrange(
+                        torch.tensor(np.stack(mask_images[win_start:win_end])[:, :, :, None]),
+                        "t h w c -> 1 t c h w",
+                    )
+                    
+
+                for key, value in batch.items():
+                    if isinstance(value, torch.Tensor):
+                        batch[key] = value.to(device=self.device, dtype=torch.bfloat16)
+
+                ref_pixel_values = batch["refer_pixel_values"]
+                refer_t_pixel_values = batch["refer_t_pixel_values"]
+                conditioning_pixel_values = batch["conditioning_pixel_values"]
+                face_pixel_values = batch["face_pixel_values"]
+
+                B, _, H, W = ref_pixel_values.shape
+                T = clip_len
+                lat_h = H // 8
+                lat_w = W // 8
+                lat_t = T // 4 + 1
+                target_shape = [lat_t + 1, lat_h, lat_w]
+                noise = [
+                    torch.randn(
+                        16,
+                        target_shape[0],
+                        target_shape[1],
+                        target_shape[2],
+                        dtype=torch.float32,
                         device=self.device,
-                        sigmas=sampling_sigmas)
-                else:
-                    raise NotImplementedError("Unsupported solver.")
+                        generator=seed_g,
+                    )
+                ]
+            
+                max_seq_len = int(math.ceil(np.prod(target_shape) // 4 / self.sp_size)) * self.sp_size
+                if max_seq_len % self.sp_size != 0:
+                    raise ValueError(f"max_seq_len {max_seq_len} is not divisible by sp_size {self.sp_size}")
 
-                latents = noise
-
-                pose_latents_no_ref =  self.vae.encode(conditioning_pixel_values.to(torch.bfloat16))
-                pose_latents_no_ref = torch.stack(pose_latents_no_ref)
-                pose_latents = torch.cat([pose_latents_no_ref], dim=2)
-
-                ref_pixel_values = rearrange(ref_pixel_values, "t c h w -> 1 c t h w")
-                ref_latents =  self.vae.encode(ref_pixel_values.to(torch.bfloat16))
-                ref_latents = torch.stack(ref_latents)
-
-                mask_ref = self.get_i2v_mask(1, lat_h, lat_w, 1, device=self.device)
-                y_ref = torch.concat([mask_ref, ref_latents[0]]).to(dtype=torch.bfloat16, device=self.device)
-
-                img = ref_pixel_values[0, :, 0]
-                clip_context = self.clip.visual([img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
-
-                if mask_reft_len > 0:
-                    if replace_flag:
-                        bg_pixel_values = batch["bg_pixel_values"]
-                        y_reft = self.vae.encode(
-                            [
-                                torch.concat([refer_t_pixel_values[0, :, :mask_reft_len], bg_pixel_values[0, :, mask_reft_len:]], dim=1).to(self.device)
-                            ]
-                        )[0]
-                        mask_pixel_values = 1 - batch["mask_pixel_values"]
-                        mask_pixel_values = rearrange(mask_pixel_values, "b t c h w -> (b t) c h w")
-                        mask_pixel_values = F.interpolate(mask_pixel_values, size=(H//8, W//8), mode='nearest')
-                        mask_pixel_values = rearrange(mask_pixel_values, "(b t) c h w -> b t c h w", b=1)[:,:,0]
-                        msk_reft = self.get_i2v_mask(lat_t, lat_h, lat_w, mask_reft_len, mask_pixel_values=mask_pixel_values, device=self.device)
+                with (
+                    torch.autocast(device_type=str(self.device), dtype=torch.bfloat16, enabled=True),
+                    torch.no_grad()
+                ):
+                    if sample_solver == 'unipc':
+                        sample_scheduler = FlowUniPCMultistepScheduler(
+                            num_train_timesteps=self.num_train_timesteps,
+                            shift=1,
+                            use_dynamic_shifting=False)
+                        sample_scheduler.set_timesteps(
+                            sampling_steps, device=self.device, shift=shift)
+                        timesteps = sample_scheduler.timesteps
+                    elif sample_solver == 'dpm++':
+                        sample_scheduler = FlowDPMSolverMultistepScheduler(
+                            num_train_timesteps=self.num_train_timesteps,
+                            shift=1,
+                            use_dynamic_shifting=False)
+                        sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
+                        timesteps, _ = retrieve_timesteps(
+                            sample_scheduler,
+                            device=self.device,
+                            sigmas=sampling_sigmas)
                     else:
-                        y_reft = self.vae.encode(
-                            [
-                                torch.concat(
-                                    [
-                                        torch.nn.functional.interpolate(refer_t_pixel_values[0, :, :mask_reft_len].cpu(),
-                                                                        size=(H, W), mode="bicubic"),
-                                        torch.zeros(3, T - mask_reft_len, H, W),
-                                    ],
-                                    dim=1,
-                                ).to(self.device)
-                            ]
-                        )[0]
-                        msk_reft = self.get_i2v_mask(lat_t, lat_h, lat_w, mask_reft_len, device=self.device)
-                else:
-                    if replace_flag:
-                        bg_pixel_values = batch["bg_pixel_values"]
-                        mask_pixel_values = 1 - batch["mask_pixel_values"]
-                        mask_pixel_values = rearrange(mask_pixel_values, "b t c h w -> (b t) c h w")
-                        mask_pixel_values = F.interpolate(mask_pixel_values, size=(H//8, W//8), mode='nearest')
-                        mask_pixel_values = rearrange(mask_pixel_values, "(b t) c h w -> b t c h w", b=1)[:,:,0]
-                        y_reft = self.vae.encode(
-                            [
-                                torch.concat(
-                                    [
-                                        bg_pixel_values[0],
-                                    ],
-                                    dim=1,
-                                ).to(self.device)
-                            ]
-                        )[0]
-                        msk_reft = self.get_i2v_mask(lat_t, lat_h, lat_w, mask_reft_len, mask_pixel_values=mask_pixel_values, device=self.device)
+                        raise NotImplementedError("Unsupported solver.")
+
+                    latents = noise
+
+                    pose_latents_no_ref =  self.vae.encode(conditioning_pixel_values.to(torch.bfloat16))
+                    pose_latents_no_ref = torch.stack(pose_latents_no_ref)
+                    pose_latents = torch.cat([pose_latents_no_ref], dim=2)
+
+                    ref_pixel_values = rearrange(ref_pixel_values, "t c h w -> 1 c t h w")
+                    ref_latents =  self.vae.encode(ref_pixel_values.to(torch.bfloat16))
+                    ref_latents = torch.stack(ref_latents)
+
+                    mask_ref = self.get_i2v_mask(1, lat_h, lat_w, 1, device=self.device)
+                    y_ref = torch.concat([mask_ref, ref_latents[0]]).to(dtype=torch.bfloat16, device=self.device)
+
+                    img = ref_pixel_values[0, :, 0]
+                    clip_context = self.clip.visual([img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
+
+                    if mask_reft_len > 0:
+                        if replace_flag:
+                            bg_pixel_values = batch["bg_pixel_values"]
+                            y_reft = self.vae.encode(
+                                [
+                                    torch.concat([refer_t_pixel_values[0, :, :mask_reft_len], bg_pixel_values[0, :, mask_reft_len:]], dim=1).to(self.device)
+                                ]
+                            )[0]
+                            mask_pixel_values = 1 - batch["mask_pixel_values"]
+                            mask_pixel_values = rearrange(mask_pixel_values, "b t c h w -> (b t) c h w")
+                            mask_pixel_values = F.interpolate(mask_pixel_values, size=(H//8, W//8), mode='nearest')
+                            mask_pixel_values = rearrange(mask_pixel_values, "(b t) c h w -> b t c h w", b=1)[:,:,0]
+                            msk_reft = self.get_i2v_mask(lat_t, lat_h, lat_w, mask_reft_len, mask_pixel_values=mask_pixel_values, device=self.device)
+                        else:
+                            y_reft = self.vae.encode(
+                                [
+                                    torch.concat(
+                                        [
+                                            torch.nn.functional.interpolate(refer_t_pixel_values[0, :, :mask_reft_len].cpu(),
+                                                                            size=(H, W), mode="bicubic"),
+                                            torch.zeros(3, T - mask_reft_len, H, W),
+                                        ],
+                                        dim=1,
+                                    ).to(self.device)
+                                ]
+                            )[0]
+                            msk_reft = self.get_i2v_mask(lat_t, lat_h, lat_w, mask_reft_len, device=self.device)
                     else:
-                        y_reft = self.vae.encode(
-                            [
-                                torch.concat(
-                                    [
-                                        torch.zeros(3, T - mask_reft_len, H, W),
-                                    ],
-                                    dim=1,
-                                ).to(self.device)
-                            ]
-                        )[0]
-                        msk_reft = self.get_i2v_mask(lat_t, lat_h, lat_w, mask_reft_len, device=self.device)
+                        if replace_flag:
+                            bg_pixel_values = batch["bg_pixel_values"]
+                            mask_pixel_values = 1 - batch["mask_pixel_values"]
+                            mask_pixel_values = rearrange(mask_pixel_values, "b t c h w -> (b t) c h w")
+                            mask_pixel_values = F.interpolate(mask_pixel_values, size=(H//8, W//8), mode='nearest')
+                            mask_pixel_values = rearrange(mask_pixel_values, "(b t) c h w -> b t c h w", b=1)[:,:,0]
+                            y_reft = self.vae.encode(
+                                [
+                                    torch.concat(
+                                        [
+                                            bg_pixel_values[0],
+                                        ],
+                                        dim=1,
+                                    ).to(self.device)
+                                ]
+                            )[0]
+                            msk_reft = self.get_i2v_mask(lat_t, lat_h, lat_w, mask_reft_len, mask_pixel_values=mask_pixel_values, device=self.device)
+                        else:
+                            y_reft = self.vae.encode(
+                                [
+                                    torch.concat(
+                                        [
+                                            torch.zeros(3, T - mask_reft_len, H, W),
+                                        ],
+                                        dim=1,
+                                    ).to(self.device)
+                                ]
+                            )[0]
+                            msk_reft = self.get_i2v_mask(lat_t, lat_h, lat_w, mask_reft_len, device=self.device)
 
-                y_reft = torch.concat([msk_reft, y_reft]).to(dtype=torch.bfloat16, device=self.device)
-                y = torch.concat([y_ref, y_reft], dim=1)
+                    y_reft = torch.concat([msk_reft, y_reft]).to(dtype=torch.bfloat16, device=self.device)
+                    y = torch.concat([y_ref, y_reft], dim=1)
 
-                arg_c = {
-                    "context": context, 
-                    "seq_len": max_seq_len,
-                    "clip_fea": clip_context.to(dtype=torch.bfloat16, device=self.device),
-                    "y": [y],
-                    "pose_latents": pose_latents,
-                    "face_pixel_values": face_pixel_values,
-                }
-
-                if guide_scale > 1:
-                    face_pixel_values_uncond = face_pixel_values * 0 - 1
-                    arg_null = {
-                        "context": context_null,
+                    arg_c = {
+                        "context": context, 
                         "seq_len": max_seq_len,
                         "clip_fea": clip_context.to(dtype=torch.bfloat16, device=self.device),
                         "y": [y],
                         "pose_latents": pose_latents,
-                        "face_pixel_values": face_pixel_values_uncond,
+                        "face_pixel_values": face_pixel_values,
                     }
 
-                for i, t in enumerate(tqdm(timesteps)):
-                    latent_model_input = latents
-                    timestep = [t]
-
-                    timestep = torch.stack(timestep)
-
-                    noise_pred_cond = TensorList(
-                         self.noise_model(TensorList(latent_model_input), t=timestep, **arg_c)
-                    )
-
                     if guide_scale > 1:
-                        noise_pred_uncond = TensorList(
-                             self.noise_model(
-                                TensorList(latent_model_input), t=timestep, **arg_null
+                        face_pixel_values_uncond = face_pixel_values * 0 - 1
+                        arg_null = {
+                            "context": context_null,
+                            "seq_len": max_seq_len,
+                            "clip_fea": clip_context.to(dtype=torch.bfloat16, device=self.device),
+                            "y": [y],
+                            "pose_latents": pose_latents,
+                            "face_pixel_values": face_pixel_values_uncond,
+                        }
+
+                    for i, t in enumerate(tqdm(timesteps)):
+                        latent_model_input = latents
+                        timestep = [t]
+
+                        timestep = torch.stack(timestep)
+
+                        noise_pred_cond = TensorList(
+                             self.noise_model(TensorList(latent_model_input), t=timestep, **arg_c)
+                        )
+
+                        if guide_scale > 1:
+                            noise_pred_uncond = TensorList(
+                                 self.noise_model(
+                                    TensorList(latent_model_input), t=timestep, **arg_null
+                                )
                             )
-                        )
-                        noise_pred = noise_pred_uncond + guide_scale * (
-                            noise_pred_cond - noise_pred_uncond
-                        )
-                    else:
-                        noise_pred = noise_pred_cond
+                            noise_pred = noise_pred_uncond + guide_scale * (
+                                noise_pred_cond - noise_pred_uncond
+                            )
+                        else:
+                            noise_pred = noise_pred_cond
 
-                    temp_x0 = sample_scheduler.step(
-                        noise_pred[0].unsqueeze(0),
-                        t,
-                        latents[0].unsqueeze(0),
-                        return_dict=False,
-                        generator=seed_g,
-                    )[0]
-                    latents[0] = temp_x0.squeeze(0)
+                        temp_x0 = sample_scheduler.step(
+                            noise_pred[0].unsqueeze(0),
+                            t,
+                            latents[0].unsqueeze(0),
+                            return_dict=False,
+                            generator=seed_g,
+                        )[0]
+                        latents[0] = temp_x0.squeeze(0)
 
-                    x0 = latents
+                        x0 = latents
 
                 x0 = [x.to(dtype=torch.float32) for x in x0]
                 out_frames = torch.stack(self.vae.decode([x0[0][:, 1:]]))
-                
-                if start != 0:
-                    out_frames = out_frames[:, :, refert_num:]
+
+                # Drop "preheat" frames at the front and any extra frames at the
+                # tail so that we only keep frames in [cur_frame, seg_end).
+                if drop_front > 0 or keep_len < clip_len - drop_front:
+                    out_frames = out_frames[:, :, drop_front:drop_front + keep_len]
 
                 all_out_frames.append(out_frames.cpu())
-
-                start += clip_len - refert_num
-                end += clip_len - refert_num
+                prev_out_frames = out_frames
+                cur_frame += keep_len
 
         videos = torch.cat(all_out_frames, dim=2)[:, :, :real_frame_len]
         return videos[0] if self.rank == 0 else None
