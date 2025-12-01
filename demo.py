@@ -54,49 +54,6 @@ def _choose_base_size_for_animate(res_str: str) -> str:
     return "1280*720"
 
 
-def _resize_video_if_needed(
-    input_path: str,
-    output_path: str,
-    target_w: int,
-    target_h: int,
-) -> str:
-    """
-    如果输入视频分辨率与目标不一致，则使用 OpenCV 重新编码到目标分辨率。
-    返回最终可用的视频路径。
-    """
-    import cv2  # lazy import
-
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open video for resizing: {input_path}")
-
-    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    # 已经是目标尺寸，直接返回原视频
-    if src_w == target_w and src_h == target_h:
-        cap.release()
-        return input_path
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps is None or fps <= 0:
-        fps = 25.0
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (target_w, target_h))
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        out.write(resized)
-
-    cap.release()
-    out.release()
-    return output_path
-
-
 def _build_ref_schedule(
     ref_image_paths: List[str],
     intervals_table,
@@ -113,22 +70,29 @@ def _build_ref_schedule(
 
     os.makedirs(save_path, exist_ok=True)
 
+    table_rows = []
+    if intervals_table is None:
+        table_rows = []
+    elif hasattr(intervals_table, "values"):
+        table_rows = intervals_table.values.tolist()
+    else:
+        table_rows = intervals_table
+
     intervals = []
-    if intervals_table is not None:
-        for row in intervals_table:
+    if table_rows:
+        for row in table_rows:
             if not row:
-                continue
-            if all(v in (None, "") for v in row):
                 continue
             try:
                 img_idx = int(row[0])
-                start_sec = float(row[1])
-                end_sec = float(row[2])
             except Exception:
                 continue
             if img_idx < 0 or img_idx >= len(ref_image_paths):
                 continue
-            if end_sec <= start_sec:
+
+            interval_text = row[1] if len(row) > 1 else ""
+            parsed_ranges = _parse_interval_ranges(interval_text)
+            if not parsed_ranges:
                 continue
 
             src_path = ref_image_paths[img_idx]
@@ -140,13 +104,14 @@ def _build_ref_schedule(
             if not dst_path.exists():
                 shutil.copy(src_path, dst_path)
 
-            intervals.append(
-                {
-                    "start_sec": start_sec,
-                    "end_sec": end_sec,
-                    "path": dst_name,
-                }
-            )
+            for start_sec, end_sec in parsed_ranges:
+                intervals.append(
+                    {
+                        "start_sec": start_sec,
+                        "end_sec": end_sec,
+                        "path": dst_name,
+                    }
+                )
 
     if not intervals:
         # 没有有效区间就不创建 schedule，后续回退到单一参考图模式
@@ -158,6 +123,78 @@ def _build_ref_schedule(
         json.dump(schedule, f, ensure_ascii=False, indent=2)
 
     return schedule_path
+
+
+def _summarize_ref_images(ref_image_paths: Optional[List[str]]):
+    """Return gallery data and markdown text for uploaded reference images."""
+    if not ref_image_paths:
+        return [], "尚未上传参考图片，上传后会显示索引。"
+
+    gallery_items = [
+        (path, f"[{idx}] {os.path.basename(path)}")
+        for idx, path in enumerate(ref_image_paths)
+    ]
+    text_lines = ["**参考图片索引对照**", "按照上传顺序自动编号："]
+    for idx, path in enumerate(ref_image_paths):
+        text_lines.append(f"- [{idx}] {os.path.basename(path)}")
+    return gallery_items, "\n".join(text_lines)
+
+
+def _prepare_ref_image_ui(ref_image_paths: Optional[List[str]], current_table=None):
+    """Sync gallery, markdown, and interval rows when reference images change."""
+    gallery_items, hint_text = _summarize_ref_images(ref_image_paths)
+
+    interval_rows: List[List[object]] = []
+    preserved = {}
+    table_rows = []
+    if current_table is None:
+        table_rows = []
+    elif hasattr(current_table, "values"):
+        table_rows = current_table.values.tolist()
+    else:
+        table_rows = current_table
+
+    if table_rows:
+        for row in table_rows:
+            if not row:
+                continue
+            try:
+                idx = int(row[0])
+            except (TypeError, ValueError):
+                continue
+            preserved[idx] = row[1] if len(row) > 1 and row[1] is not None else ""
+
+    if ref_image_paths:
+        for idx in range(len(ref_image_paths)):
+            interval_rows.append([idx, preserved.get(idx, "")])
+
+    return gallery_items, hint_text, gr.update(value=interval_rows)
+
+
+def _parse_interval_ranges(interval_text: Optional[str]) -> List[Tuple[float, float]]:
+    """Parse comma-separated `start-end` segments into float tuples."""
+    if not interval_text:
+        return []
+
+    normalized = interval_text.replace("，", ",")
+    ranges: List[Tuple[float, float]] = []
+    for token in normalized.split(","):
+        token = token.strip()
+        if not token or "-" not in token:
+            continue
+        start_str, end_str = token.split("-", 1)
+        try:
+            start = float(start_str.strip())
+            end = float(end_str.strip())
+        except ValueError:
+            continue
+        if start == end:
+            continue
+        if end < start:
+            start, end = end, start
+        ranges.append((start, end))
+
+    return ranges
 
 
 def _run_subprocess(cmd: List[str], cwd: Path, log_prefix: str = ""):
@@ -296,7 +333,7 @@ def run_animate_pipeline(
         "--size",
         base_size_for_generate,
         "--save_file",
-        str(base_output_video),
+        str(base_output_video)
     ]
 
     try:
@@ -309,19 +346,8 @@ def run_animate_pipeline(
         yield all_logs, None
         return
 
-    # 3) 如有需要，对生成视频进行二次缩放到用户选择的分辨率
-    final_video_path = run_dir / "output.mp4"
-    try:
-        final_video = _resize_video_if_needed(
-            input_path=str(base_output_video),
-            output_path=str(final_video_path),
-            target_w=target_w,
-            target_h=target_h,
-        )
-    except Exception as exc:
-        all_logs += f"\n[WARN] 调整输出分辨率失败，将直接使用原始生成视频: {exc}\n"
-        final_video = str(base_output_video)
-
+    # 3) 直接返回生成脚本输出的视频
+    final_video = str(base_output_video)
     all_logs += f"\n生成完成，最终视频路径: {final_video}\n"
     yield all_logs, final_video
 
@@ -334,16 +360,16 @@ def build_demo():
 
 上传待复刻视频和一张或多张参考图片，可为每张参考图片设置多个时间区间。
 
-- `image_index` 为参考图片在上传顺序中的索引（从 0 开始）
-- `start_sec` / `end_sec` 为该参考图生效的起止时间（单位：秒），区间为左闭右开 `[start_sec, end_sec)`，即不包含 `end_sec` 那一刻
+- 每张参考图在下方“参考图片时间区间”表格中会自动生成一行，左侧展示索引，右侧可填写形如 `0-2,5-8` 的区间列表（多个区间用逗号隔开，可填写整数或小数）。
+- 区间依旧视为左闭右开 `[start_sec, end_sec)`，若填写顺序相反（如 `5-4`）将自动按时间从小到大排序。
 """
         )
 
         with gr.Row():
-            driving_video = gr.File(
-                label="待复刻视频",
-                file_types=["video"],
-                type="filepath",
+            driving_video = gr.Video(
+                label="待复刻视频（上传后自动预览）",
+                sources=["upload"],
+                interactive=True,
             )
             ref_images = gr.File(
                 label="参考图片（可多张）",
@@ -352,12 +378,21 @@ def build_demo():
                 type="filepath",
             )
 
+        image_gallery = gr.Gallery(
+            label="已上传参考图预览",
+            value=[],
+            columns=4,
+            height="auto",
+        )
+        image_index_hint = gr.Markdown("上传参考图后，这里会展示索引对照表。")
+
         intervals = gr.Dataframe(
-            headers=["image_index", "start_sec", "end_sec"],
-            datatype=["number", "number", "number"],
-            row_count=(1, "dynamic"),
-            col_count=3,
-            label="参考图片时间区间（可留空，仅使用首张参考图）",
+            headers=["image_index", "intervals"],
+            datatype=["number", "str"],
+            row_count=(0, "dynamic"),
+            col_count=2,
+            label="参考图片时间区间（右侧输入 0-2,5-8 形式的区间，逗号分隔）",
+            type="array",
         )
 
         resolution = gr.Dropdown(
@@ -382,6 +417,13 @@ def build_demo():
             inputs=[driving_video, ref_images, intervals, resolution],
             outputs=[logs, output_video],
             queue=True,
+        )
+
+        ref_images.change(
+            fn=_prepare_ref_image_ui,
+            inputs=[ref_images, intervals],
+            outputs=[image_gallery, image_index_hint, intervals],
+            queue=False,
         )
 
     return demo
