@@ -340,9 +340,9 @@ def build_demo():
         )
 
         with gr.Row():
-            driving_video = gr.Video(
+            driving_video = gr.File(
                 label="待复刻视频",
-                sources=["upload"],
+                file_types=["video"],
                 type="filepath",
             )
             ref_images = gr.File(
