@@ -218,6 +218,7 @@ def run_animate_pipeline(
     ref_images: List[str],
     intervals_table,
     resolution: str,
+    front_ref_index: Optional[float],
 ):
     """
     Gradio 回调：执行预处理 + 生成流程，并在页面中展示日志和结果视频。
@@ -226,6 +227,18 @@ def run_animate_pipeline(
         return "请先上传待复刻视频。", None
     if not ref_images:
         return "请至少上传一张参考图片。", None
+
+    # 选择 front_refer_path 对应的参考图索引（单选）
+    try:
+        if front_ref_index is None:
+            front_idx = 0
+        else:
+            front_idx = int(front_ref_index)
+    except Exception:
+        front_idx = 0
+    if front_idx < 0 or front_idx >= len(ref_images):
+        front_idx = 0
+    front_ref_path = ref_images[front_idx]
 
     try:
         target_w, target_h = _parse_resolution(resolution)
@@ -259,6 +272,7 @@ def run_animate_pipeline(
     all_logs += "Reference images:\n"
     for idx, p in enumerate(ref_images):
         all_logs += f"  [{idx}] {p}\n"
+    all_logs += f"Front reference index (front_refer_path): {front_idx}\n"
     all_logs += f"Target resolution: {resolution}\n"
     all_logs += f"Generate base size (animate-14B): {base_size_for_generate}\n"
     if schedule_path is not None:
@@ -284,6 +298,10 @@ def run_animate_pipeline(
         "--retarget_flag",
         "--use_flux",
     ]
+
+    # 始终把选定的 front_refer_path 传给预处理脚本，用于生成固定正面参考图
+    if front_ref_path:
+        preprocess_cmd += ["--front_refer_path", front_ref_path]
 
     if schedule_path is not None:
         preprocess_cmd += ["--refer_schedule", str(schedule_path)]
@@ -387,6 +405,12 @@ def build_demo():
             label="输出分辨率（宽*高）",
         )
 
+        front_ref_index = gr.Number(
+            label="正面参考图索引（front_refer_path，对应上方索引，整数）",
+            value=0,
+            precision=0,
+        )
+
         run_button = gr.Button("生成", variant="primary")
 
         logs = gr.Textbox(
@@ -400,7 +424,7 @@ def build_demo():
 
         run_button.click(
             fn=run_animate_pipeline,
-            inputs=[driving_video, ref_images, intervals, resolution],
+            inputs=[driving_video, ref_images, intervals, resolution, front_ref_index],
             outputs=[logs, output_video],
             queue=True,
         )
