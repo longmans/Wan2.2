@@ -307,7 +307,7 @@ python ./wan/modules/animate/preprocess/preprocess_data.py \
     --video_path ./examples/wan_animate/animate/video.mp4 \
     --refer_path ./examples/wan_animate/animate/image.jpeg \
     --save_path ./examples/wan_animate/animate/process_results \
-    --resolution_area 1280 720 \
+    --resolution_area 1920 1080 \
     --retarget_flag \
     --use_flux
 ```
@@ -318,13 +318,15 @@ python ./wan/modules/animate/preprocess/preprocess_data.py \
     --video_path ./examples/wan_animate/replace/video.mp4 \
     --refer_path ./examples/wan_animate/replace/image.jpeg \
     --save_path ./examples/wan_animate/replace/process_results \
-    --resolution_area 1280 720 \
+    --resolution_area 1920 1080 \
     --iterations 3 \
     --k 7 \
     --w_len 1 \
     --h_len 1 \
     --replace_flag
 ```
+
+> ⚠️ `--resolution_area` takes `[width, height]` as the target pixel area. Values such as `1920 1080` (or `1080 1920`) are now supported; the pipeline will automatically snap to the nearest valid multiples of 16 required by the VAE/DiT.
 > ✅ **Multiple reference images**: Provide `--refer_schedule /path/to/ref_schedule.json` when running `preprocess_data.py` (or manually place the file under the output directory as `src_ref_schedule.json`). `generate.py` automatically picks it up whenever the file is present.
 
 Example `ref_schedule.json` structure:

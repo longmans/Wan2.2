@@ -25,6 +25,8 @@ RUN_ROOT = PROJECT_ROOT / "examples" / "wan_animate" / "gradio_runs"
 RESOLUTION_OPTIONS = [
     "720*1280",   # default
     "1280*720",
+    "1080*1920",
+    "1920*1080",
 ]
 DEFAULT_RESOLUTION = "720*1280"
 

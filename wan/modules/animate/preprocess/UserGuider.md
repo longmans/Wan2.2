@@ -45,7 +45,7 @@ In this mode, it is highly recommended to enable pose retargeting, especially if
 
 - When using `animation` mode, two videos, `src_face.mp4` and `src_pose.mp4`, will be generated in `save_path`. When using `replacement` mode, two additional videos, `src_bg.mp4` and `src_mask.mp4`, will also be generated.
 
-- The `resolution_area` parameter determines the resolution for both preprocessing and the generation model. Its size is determined by pixel area.
+- The `resolution_area` parameter determines the resolution for both preprocessing and the generation model. Its size is determined by pixel area. Values such as `1920 1080` (or `1080 1920`) are supported; the pipeline will automatically snap to the nearest multiples of 16 that the VAE/DiT expect.
 
 - The `fps` parameter can specify the frame rate for video processing. A lower frame rate can improve generation efficiency, but may cause stuttering or choppiness.
 
