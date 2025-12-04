@@ -4,7 +4,7 @@ python ./wan/modules/animate/preprocess/preprocess_data.py \
     --ckpt_path ./Wan2.2-Animate-14B/process_checkpoint \
     --video_path ./examples/wan_animate/animate/fashion.mp4 \
     --save_path  $save_path \
-    --resolution_area 1920 1080 \
+    --resolution_area 1080 1920 \
     --retarget_flag \
     --use_flux \
     --refer_schedule ./ref_schedule.json
